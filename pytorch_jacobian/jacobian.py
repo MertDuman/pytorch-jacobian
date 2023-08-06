@@ -14,7 +14,7 @@ def get_batch_jacobian_vmap_jacrev(*x, model, Nin=None, Nout=None, chunk_size=No
     *x
         Series of batch of inputs to the model, of shape (N, ...).
     model
-        Model to calculate the Jacobian of. If your model takes multiple inputs use argnums + in_dims.
+        Model to calculate the Jacobian of. If your model takes multiple inputs use target_inputs and input_vmap_dims.
     Nin
         Number of differentiated inputs. We'll try to infer this from target_inputs if passed. Otherwise, defaults to 1.
     Nout
@@ -153,14 +153,15 @@ def unwindow_image(patches: torch.Tensor, window_size: int, H: int, W: int, stri
 
 def get_batch_diag_jacobian_vmap_jacrev_windowed(x, model, window_size=32, pad=None, batch_size=16, window_batch_size=16**2, flatten=False, target_output=None):
     '''
-    Estimates the batch Jacobian, assuming x is an image and the model's receptive field is smaller than window_size. 
+    Estimates the batch Jacobian, assuming x is an image and the model's receptive field is smaller than pad. 
     Instead of calculating the Jacobian for the whole image, this calculates the diagonal of the Jacobian for small patches of the image.
 
-    This is MUCH faster than any other method, and has less memory requirements. However, it is only an estimate of the Jacobian.
+    This is MUCH faster than any other method, and has less memory requirements. However, it is only an estimate of the Jacobian. One obvious
+    drawback is that some models have very large receptive fields, e.g. transformers, or they use image-wide pooling, e.g. global average pooling.
 
     Parameters:
     x
-        Batch of images to calculate the Jacobian of, of shape (N, C, H, W).
+        Images to calculate the Jacobian of, of shape (N, C, H, W).
     model
         Model to calculate the Jacobian of.
     window_size
