@@ -85,7 +85,7 @@ def get_batch_jacobian_vmap_jacrev(*x, model, Nin=None, Nout=None, chunk_size=No
 
 
 
-def window_image(img: torch.Tensor, window_size: int, stride: int = None, pad: Union[int, tuple] = None, padmode: str = 'constant') -> torch.Tensor:
+def window_image(img: torch.Tensor, window_size: int, stride: int = None, image_pad: Union[int, tuple] = None, patch_pad: Union[int, tuple] = None, pad_mode: str = 'constant') -> torch.Tensor:
     """
     Window an image into patches of size window_size x window_size
 
@@ -96,42 +96,65 @@ def window_image(img: torch.Tensor, window_size: int, stride: int = None, pad: U
         Size of the window
     stride
         Stride of the window, defaults to window_size
-    pad
-        Returned patches will leak to one another by pad amount.
-        Pad is a 4-tuple of pads for: (left, right, top, bottom). Or a single int, in which case, the same pad is applied to all 4 sides.
-        To reconstruct from padded patches, either call unwindow_image with the same patches and pad, or remove the pad from the patches manually
-        and call unwindow_image with no pad.
+    image_pad
+        Pad the image before windowing. image_pad is a 4-tuple of pads for: (left, right, top, bottom). Or a single int, in which case, the same pad is applied to all 4 sides.
+    patch_pad
+        Patches will leak to one another by pad amount.
+        patch_pad is a 4-tuple of pads for: (left, right, top, bottom). Or a single int, in which case, the same pad is applied to all 4 sides.
+        This helps creatings windows of all sizes, and gets rid of the need for window_size/stride arithmetic to do so.
+    pad_mode
+        Same as torch.nn.functional.pad's mode. Defaults to 'constant', possible values are 'constant', 'reflect', 'replicate' or 'circular'.
     Returns:
-        patches: windowed image, of shape (N, num_patches, C, window_size, window_size)
+    patches
+        windowed image, of shape (N, num_patches, C, window_size, window_size)
     """
-    assert pad is None or isinstance(pad, int) or len(pad) == 4, "pad must be int, or 4-tuple"
-    pad = 0 if pad is None else pad
+    assert image_pad is None or isinstance(image_pad, int) or len(image_pad) == 4, "pad must be int, or 4-tuple"
+    assert patch_pad is None or isinstance(patch_pad, int) or len(patch_pad) == 4, "pad must be int, or 4-tuple"
+    image_pad = 0 if image_pad is None else image_pad
+    patch_pad = 0 if patch_pad is None else patch_pad
     stride = window_size if stride is None else stride
     
-    pad = (pad, pad, pad, pad) if isinstance(pad, int) else pad
-    img = F.pad(img, pad, mode=padmode)
-    window_size_H = window_size + pad[2] + pad[3]
-    window_size_W = window_size + pad[0] + pad[1]
+    image_pad = (image_pad, image_pad, image_pad, image_pad) if isinstance(image_pad, int) else image_pad
+    patch_pad = (patch_pad, patch_pad, patch_pad, patch_pad) if isinstance(patch_pad, int) else patch_pad
+    comb_pad = tuple(a + b for a, b in zip(image_pad, patch_pad))
+    img = F.pad(img, comb_pad, mode=pad_mode)
+    window_size_H = window_size + patch_pad[2] + patch_pad[3]
+    window_size_W = window_size + patch_pad[0] + patch_pad[1]
 
-    N, C, H, W = img.shape
+    N, C, _, _ = img.shape
     patches = img.unfold(2, window_size_H, stride).unfold(3, window_size_W, stride)
     patches = patches.permute(0, 2, 3, 1, 4, 5).contiguous().view(N, -1, C, window_size_H, window_size_W)
     return patches
 
-def unwindow_image(patches: torch.Tensor, window_size: int, H: int, W: int, stride: int = None, pad: Union[int, tuple] = None) -> torch.Tensor:
+def unwindow_image(patches: torch.Tensor, window_size: int, H: int, W: int, stride: int = None, image_pad: Union[int, tuple] = None, patch_pad: Union[int, tuple] = None) -> torch.Tensor:
     """
     Unwindow patches of size window_size x window_size into an image of size H x W
 
     Parameters:
-        patches: windowed image, of shape (N, num_patches, C, window_size, window_size)
-        window_size: size of the window
-        H: height of the original image
-        W: width of the original image
+        patches
+            Windowed image, of shape (N, num_patches, C, window_size, window_size)
+        window_size
+            Size of the window
+        H
+            Height of the original image
+        W
+            Width of the original image
+        stride
+            Stride of the window, defaults to window_size
+        image_pad
+            Pad applied to the image before windowing
+        patch_pad
+            Patches leak to one another by pad amount.
+            patch_pad is a 4-tuple of pads for: (left, right, top, bottom). Or a single int, in which case, the same pad is applied to all 4 sides.
+            Use the same patch_pad as used in window_image
     Returns:
-        img: image of shape (N, C, H, W)
+        img
+            image of shape (N, C, H, W)
     """
-    assert pad is None or isinstance(pad, int) or len(pad) == 4, "pad must be int, or 4-tuple"
-    pad = 0 if pad is None else pad
+    assert image_pad is None or isinstance(image_pad, int) or len(image_pad) == 4, "pad must be int, or 4-tuple"
+    assert patch_pad is None or isinstance(patch_pad, int) or len(patch_pad) == 4, "pad must be int, or 4-tuple"
+    image_pad = 0 if image_pad is None else image_pad
+    patch_pad = 0 if patch_pad is None else patch_pad
     stride = window_size if stride is None else stride
     assert stride <= window_size, "can't reconstruct image unless stride <= window_size"
     assert window_size % stride == 0, "can't reconstruct image unless stride divides window_size (i could fix this but i'm lazy)"
@@ -139,15 +162,22 @@ def unwindow_image(patches: torch.Tensor, window_size: int, H: int, W: int, stri
 
     N, _, C, _, _ = patches.shape  # can get window_size from patches too..
 
-    pad = (pad, pad, pad, pad) if isinstance(pad, int) else pad
-    window_size_H = window_size + pad[2] + pad[3]
-    window_size_W = window_size + pad[0] + pad[1]
+    image_pad = (image_pad, image_pad, image_pad, image_pad) if isinstance(image_pad, int) else image_pad
+    H = H + image_pad[2] + image_pad[3]
+    W = W + image_pad[0] + image_pad[1]
+    patch_pad = (patch_pad, patch_pad, patch_pad, patch_pad) if isinstance(patch_pad, int) else patch_pad
+    window_size_H = window_size + patch_pad[2] + patch_pad[3]
+    window_size_W = window_size + patch_pad[0] + patch_pad[1]
 
-    H_patches = (H + pad[2] + pad[3] - window_size_H) // stride + 1
-    W_patches = (W + pad[0] + pad[1] - window_size_W) // stride + 1
+    H_patches = (H + patch_pad[2] + patch_pad[3] - window_size_H) // stride + 1
+    H_residue = (H + patch_pad[2] + patch_pad[3] - window_size_H) % stride
+    W_patches = (W + patch_pad[0] + patch_pad[1] - window_size_W) // stride + 1
+    W_residue = (W + patch_pad[0] + patch_pad[1] - window_size_W) % stride
+    print(H_patches, W_patches, (window_size_H-patch_pad[3]) - patch_pad[2], (window_size_W-patch_pad[1]) - patch_pad[0])
     patches = patches.view(N, H_patches, W_patches, C, window_size_H, window_size_W)
-    patches = patches[:, ::step, ::step, :, pad[2]:window_size_H-pad[3], pad[0]:window_size_W-pad[1]]
-    img = patches.permute(0, 3, 1, 4, 2, 5).contiguous().view(N, C, H, W)
+    patches = patches[:, ::step, ::step, :, patch_pad[2]:window_size_H-patch_pad[3], patch_pad[0]:window_size_W-patch_pad[1]]
+    img = patches.permute(0, 3, 1, 4, 2, 5).contiguous().view(N, C, H - H_residue, W - W_residue)
+    img = img[:, :, image_pad[2]:H - image_pad[3], image_pad[0]:W - image_pad[1]]
     return img
 
 
@@ -186,7 +216,7 @@ def get_batch_diag_jacobian_vmap_jacrev_windowed(x, model, window_size=32, pad=N
     window_size_H = window_size + pad[2] + pad[3]
     window_size_W = window_size + pad[0] + pad[1]
 
-    patches = window_image(x, window_size, pad=pad)
+    patches = window_image(x, window_size, patch_pad=pad)
     num_patches = patches.shape[1]
     N, C, H, W = x.shape
     num_fx = np.prod(x.shape[1:])
@@ -204,7 +234,7 @@ def get_batch_diag_jacobian_vmap_jacrev_windowed(x, model, window_size=32, pad=N
     w_jacobian_diag = torch.vmap(torch.func.vmap(partial_early_diag, chunk_size=window_batch_size), chunk_size=batch_size)(patches)
     # This won't work if num_fy != num_fx
     w_jacobian_diag = w_jacobian_diag.view(N, num_patches, C, window_size_H, window_size_W)
-    unw_jacobian_diag = unwindow_image(w_jacobian_diag, window_size, H, W, pad=pad)
+    unw_jacobian_diag = unwindow_image(w_jacobian_diag, window_size, H, W, patch_pad=pad)
     if flatten:
         unw_jacobian_diag = unw_jacobian_diag.view(N, num_fx)
     return unw_jacobian_diag
