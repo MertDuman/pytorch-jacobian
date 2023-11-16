@@ -118,6 +118,7 @@ def window_image(img: torch.Tensor, window_size: int, stride: int = None, image_
     patch_pad = (patch_pad, patch_pad, patch_pad, patch_pad) if isinstance(patch_pad, int) else patch_pad
     comb_pad = tuple(a + b for a, b in zip(image_pad, patch_pad))
     img = F.pad(img, comb_pad, mode=pad_mode)
+
     window_size_H = window_size + patch_pad[2] + patch_pad[3]
     window_size_W = window_size + patch_pad[0] + patch_pad[1]
 
@@ -173,10 +174,36 @@ def unwindow_image(patches: torch.Tensor, window_size: int, H: int, W: int, stri
     H_residue = (H + patch_pad[2] + patch_pad[3] - window_size_H) % stride
     W_patches = (W + patch_pad[0] + patch_pad[1] - window_size_W) // stride + 1
     W_residue = (W + patch_pad[0] + patch_pad[1] - window_size_W) % stride
-    print(H_patches, W_patches, (window_size_H-patch_pad[3]) - patch_pad[2], (window_size_W-patch_pad[1]) - patch_pad[0])
+
+    print(H_patches, W_patches, H_residue, W_residue)
+    
+    # Step 1: separate H_patches and W_patches
     patches = patches.view(N, H_patches, W_patches, C, window_size_H, window_size_W)
-    patches = patches[:, ::step, ::step, :, patch_pad[2]:window_size_H-patch_pad[3], patch_pad[0]:window_size_W-patch_pad[1]]
-    img = patches.permute(0, 3, 1, 4, 2, 5).contiguous().view(N, C, H - H_residue, W - W_residue)
+    # Step 2: remove overlaps and patch padding
+    patches_rec = patches[:, ::step, ::step, :, patch_pad[2]:window_size_H-patch_pad[3], patch_pad[0]:window_size_W-patch_pad[1]]
+    # Step 3: reshape to original image size (but we might not be able to fully reconstruct the original if window_size doesn't divide the image size)
+    img = patches_rec.permute(0, 3, 1, 4, 2, 5).contiguous().view(N, C, H - H_residue, W - W_residue)
+
+    did_W_recon = False
+    # Step 4: Due to patch_pad, we may be able to reconstruct some of the image that was lost due to stride
+    #         E.g. image size = 30, window_size = stride = 20, patch_pad = (0,100,0,0). Patch pad lets us capture the would-be missing 10 pixels
+    if (patch_pad[1] > 0) and W_residue != 0:
+        W_saved = min(patch_pad[1], W_residue)
+        W_recon = patches[:, :, -1, :, patch_pad[2]:window_size_H-patch_pad[3], patch_pad[0]+window_size:patch_pad[0]+window_size+W_saved].permute(0, 2, 1, 3, 4).contiguous().view(N, C, H - H_residue, W_saved)
+        img = torch.cat((img, W_recon), dim=3)
+        did_W_recon = True
+
+    if (patch_pad[3] > 0) and H_residue != 0:
+        H_saved = min(patch_pad[3], H_residue)
+        H_recon = patches[:, -1, :, :, patch_pad[2]+window_size:patch_pad[2]+window_size+H_saved, patch_pad[0]:window_size_W-patch_pad[1]].permute(0, 2, 1, 3, 4).contiguous().view(N, C, H_saved, W - W_residue)
+        
+        # We need to append the corner patch to the bottom right corner if we reconstructed the right side
+        if did_W_recon:
+            corner_patch = patches[:, -1, -1, :, patch_pad[2]+window_size:patch_pad[2]+window_size+H_saved, patch_pad[0]+window_size:patch_pad[0]+window_size+W_saved].view(N, C, H_saved, W_saved)
+            H_recon = torch.cat((H_recon, corner_patch), dim=3)
+        img = torch.cat((img, H_recon), dim=2)
+
+    # Step 5: remove image padding
     img = img[:, :, image_pad[2]:H - image_pad[3], image_pad[0]:W - image_pad[1]]
     return img
 
